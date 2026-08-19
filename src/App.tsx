@@ -5,6 +5,7 @@ import { ResultPanel } from "@/components/ResultPanel";
 import { PrintReport } from "@/components/PrintReport";
 import { demoResume, demoJD, demoExtraProjects } from "@/lib/demo-data";
 import { loadFromStorage, saveToStorage, clearStorage } from "@/lib/storage";
+import { analyzeResume } from "@/lib/aiService";
 import type { AnalysisResult } from "@/lib/types";
 
 interface ToastState {
@@ -42,16 +43,16 @@ function ErrorToast({
 
   return (
     <div
-      className="fixed top-6 right-6 z-50 animate-[slideIn_0.3s_ease-out]"
+      className="fixed top-6 left-1/2 -translate-x-1/2 z-50 w-[92%] max-w-md animate-[slideIn_0.3s_ease-out]"
       role="alert"
     >
       <div
-        className={`flex items-start gap-3 bg-gradient-to-r ${bgColor} text-white rounded-xl shadow-2xl px-5 py-4 min-w-[340px] max-w-[480px]`}
+        className={`flex items-start gap-3 bg-gradient-to-r ${bgColor} text-white rounded-xl shadow-2xl px-5 py-4 w-full`}
       >
         <span className="text-2xl flex-shrink-0">{icon}</span>
         <div className="flex-1 min-w-0">
           <div className="font-semibold text-sm mb-1">{toast.title}</div>
-          <div className="text-xs leading-relaxed opacity-95 break-words">
+          <div className="text-xs leading-relaxed opacity-95 break-words whitespace-pre-line">
             {toast.message}
           </div>
         </div>
@@ -154,31 +155,25 @@ export default function App() {
     );
 
     try {
-      const resp = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await resp.json();
-
-      if (!resp.ok) {
-        const errMsg =
-          data?.error ||
-          `分析请求失败 (HTTP ${resp.status})，请稍后重试`;
-        console.error(`[前端] 分析请求失败: HTTP ${resp.status}`, errMsg);
-        showErrorToast("分析失败", errMsg);
-        return;
-      }
-
+      const data = await analyzeResume(
+        payload.resume,
+        payload.jd,
+        payload.extra_projects
+      );
       console.log(
         `[前端] 分析成功: match_score=${data?.match_score ?? "N/A"}`
       );
       setResult(data);
     } catch (e: any) {
-      console.error("[前端] 网络异常:", e?.message || e);
+      console.error("[前端] AI 调用失败:", e?.message || e);
       showErrorToast(
-        "网络异常",
-        "无法连接到后端服务，请确认服务已启动（npm run dev:api）后重试"
+        e?.message?.includes("API Key")
+          ? "API Key 未配置"
+          : e?.message?.includes("网络异常")
+            ? "网络异常"
+            : "分析失败",
+        e?.message ||
+          "AI 调用失败，请稍后重试。若反复失败，请检查 API Key 配置。"
       );
     } finally {
       setLoading(false);
