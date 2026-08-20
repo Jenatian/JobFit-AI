@@ -1,5 +1,6 @@
 import type { AnalysisResult } from "@/lib/types";
 import { safeSuggestionText } from "@/components/DiffRewriteFlow";
+import { cleanSummaryMismatch } from "@/lib/aiService";
 
 interface PrintReportProps {
   result: AnalysisResult;
@@ -167,7 +168,7 @@ export function PrintReport({ result, context }: PrintReportProps) {
 
           <div className="print-summary">
             <span className="print-summary-icon">▸</span>
-            <p>{result.summary}</p>
+            <p>{cleanSummaryMismatch(result.summary, result.match_score)}</p>
           </div>
         </section>
 

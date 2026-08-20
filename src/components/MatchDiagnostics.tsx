@@ -1,6 +1,7 @@
 import { Target, Wrench, Briefcase, TrendingUp, ShieldCheck, AlertTriangle } from "lucide-react";
 import type { Dimensions, CalibrationMeta } from "@/lib/types";
 import { ScoreRing } from "./ScoreRing";
+import { cleanSummaryMismatch } from "@/lib/aiService";
 
 interface Props {
   score: number;
@@ -56,6 +57,9 @@ function DimensionBar({
 export function MatchDiagnostics({ score, summary, dimensions, calibrationMeta }: Props) {
   const bandLabel = score >= 90 ? "极致匹配" : score >= 75 ? "资深强相关" : score >= 55 ? "潜力应届" : score >= 30 ? "弱匹配" : "不匹配";
   const bandColor = score >= 90 ? "#56665f" : score >= 75 ? "#5f7387" : score >= 55 ? "#8a7962" : score >= 30 ? "#c07d7d" : "#8a6b6b";
+
+  // 渲染期最后一道防线：清洗 summary 中与 match_score 不一致的数字分数与档位标签
+  const safeSummary = cleanSummaryMismatch(summary, score);
 
   return (
     <section className="glass-card rounded-2xl p-6 lg:p-7 animate-slide-up">
@@ -120,7 +124,7 @@ export function MatchDiagnostics({ score, summary, dimensions, calibrationMeta }
             <div className="text-xs font-semibold text-sage-700 mb-1">
               AI 总评摘要
             </div>
-            <p className="text-sm text-slate-700 leading-relaxed">{summary}</p>
+            <p className="text-sm text-slate-700 leading-relaxed">{safeSummary}</p>
           </div>
         </div>
       </div>

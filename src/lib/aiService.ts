@@ -12,266 +12,153 @@
  */
 import type { AnalysisResult } from "@/lib/types";
 
-/**
- * 5 级 Rubric 评分量规 + 多元化建议体系 System Prompt
- * 与原后端 server/routes/analyze.ts 完全一致
- */
-export const SYSTEM_PROMPT = `你是一位资深的 AI 招聘顾问和简历优化专家，精通技术招聘市场的 JD 分析和简历改写。请仔细分析用户提供的简历文本、目标岗位 JD，以及可选的"未写入简历的额外项目/经历素材"，然后输出一份深度对齐诊断报告。
+export type PipelineStageId = 1 | 2 | 3 | 4;
 
-请严格按照以下 JSON 结构返回，不要输出任何额外的文字说明，只返回纯 JSON（如果模型输出中包含 \`\`\`json 或 \`\`\` 标记，也是可以接受的）：
+export interface PipelineStageUpdate {
+  stageId: PipelineStageId;
+  status: "pending" | "active" | "done";
+  detail: string;
+  progress: number;
+}
 
+export type PipelineStageCallback = (update: PipelineStageUpdate) => void;
+
+export const PIPELINE_STAGES = [
+  {
+    id: 1 as PipelineStageId,
+    icon: "🔍",
+    title: "解构岗位 JD 核心能力画像",
+    activeText: "解析中...",
+    doneTextPrefix: "已提取",
+    doneTextSuffix: "个硬技能与门槛指标",
+  },
+  {
+    id: 2 as PipelineStageId,
+    icon: "⚖️",
+    title: "简历经历与素材库语义交叉比对",
+    activeText: "比对中...",
+    doneTextPrefix: "发现",
+    doneTextSuffix: "个高 ROI 置换项目",
+  },
+  {
+    id: 3 as PipelineStageId,
+    icon: "📊",
+    title: "触发工业级 Rubric 量规打分与熔断检测",
+    activeText: "计算中...",
+    doneTextPrefix: "命中",
+    doneTextSuffix: "项规则约束",
+  },
+  {
+    id: 4 as PipelineStageId,
+    icon: "✍️",
+    title: "执行病灶自适应分流与 STAR 逐段精修",
+    activeText: "正在生成可落地的行动蓝图...",
+    doneTextPrefix: "",
+    doneTextSuffix: "",
+  },
+];
+
+// ==================== 阶段一 Prompt（宏观诊断 Fast <3s） ====================
+// 仅输出 match_score / dimensions / missing_keywords / project_strategy / summary
+export const PHASE1_PROMPT = `你是「人岗对齐宏观诊断引擎」，只做评分+战略看板，不生成改写建议。严格按JSON输出。
+
+【必须字段】
 {
-  "match_score": 0-100 整数，严格遵循 Rubric 量规计算的综合匹配分，不得取中间值,
-  "score_breakdown": {
-    "skill_match": 0-100 整数，技能关键词对齐度（技能覆盖比例 × 权重）,
-    "experience_relevance": 0-100 整数，经历场景相关性（经历层级匹配度）,
-    "quantification_level": 0-100 整数，量化/数据化成果程度
-  },
-  "dimensions": {
-    "skill_match": 与 score_breakdown.skill_match 相同值,
-    "experience_relevance": 与 score_breakdown.experience_relevance 相同值,
-    "quantification_level": 与 score_breakdown.quantification_level 相同值
-  },
-  "missing_keywords": ["JD 要求但简历中缺失或明显弱化的关键技能/关键词标签"],
+  "match_score": 0-100整数,
+  "score_breakdown": {"skill_match":0-100,"experience_relevance":0-100,"quantification_level":0-100},
+  "dimensions": 与score_breakdown完全相同,
+  "summary": "60字以内一句话：[画像判定]+核心优势+关键差距+下一步指引。画像判定须与 match_score 同档（90-100极致型/75-89资深型/55-74潜力型/30-54弱匹配型/0-29完全不对口型）。严禁在 summary 中出现与 match_score 不一致的分数数字（若需引用，必须等于 match_score 本身）。示例：「潜力型：缺少 RAG/Agent 核心硬技能，建议补齐大模型应用栈并加 2 段量化成果」（不要写死具体分数）",
+  "missing_keywords": ["6-12个JD要求但简历缺失的核心关键词标签"],
   "project_strategy": {
-    "recommended_additions": [
-      {
-        "project_name": "素材库中推荐加入简历的项目名称",
-        "why_add": "命中 JD 的哪些关键词与能力要求",
-        "action_advice": "具体操作建议"
-      }
-    ],
-    "recommended_removals": [
-      {
-        "project_name": "原简历中建议删除或大幅降权的项目名称",
-        "why_remove": "删除理由"
-      }
-    ],
-    "project_pivots": [
-      {
-        "project_name": "建议重构叙事角度的现有项目名称",
-        "pivot_advice": "具体如何调整叙事重心与措辞"
-      }
-    ]
-  },
-  "suggestions": [
-    {
-      "type": "rewrite 或 new_project_blueprint 或 section_addition",
-      "category_tag": "彩色标签文字，如「🔥 推荐自建实战项目蓝图」「✏️ 现有描述精修」「💡 关键板块补充」",
-      "section": "精确标注来源板块，如「项目经历（建议新增）」「个人简介」",
-      "original": "原简历中对应内容，若为新增项目/板块则注明「原简历缺失」",
-      "improved": "建议内容：rewrite 类型为改写后的文字；blueprint 类型为完整 STAR 项目蓝图（含痛点、技术方案、量化框架）；section_addition 为新增板块的完整内容",
-      "reason": "深度考量与行动指南：为什么这样做、如何动手完成、预计达成什么效果"
-    }
-  ]
+    "recommended_additions": [{"project_name":"素材库/可新增项目名","why_add":"命中JD哪项能力","action_advice":"1-2步操作"}],
+    "recommended_removals": [{"project_name":"要删的原项目名","why_remove":"与JD无关/低价值"}],
+    "project_pivots": [{"project_name":"要改写的原项目名","pivot_advice":"调整叙事重心的1句话策略"}]
+  }
 }
 
-【工业级 Rubric 评分量规 · 核心】
-你必须严格按照以下分档标准评分，严禁"老好人"式中间打分，必须真实拉开分差。
-先独立评估三个维度，再按公式计算综合分。
+【Rubric 5档量规】
+90-100极致：对口+一线+技能≥90%+深度量化
+75-89资深：2年+垂直+技能75~85%+有业务量化
+55-74潜力应届：1-2个完整项目+技能50~70%+少量量化
+30-54弱匹配：无实操+核心缺+口水话+零量化
+0-29完全不对口：无交叉+核心全缺
 
-═══ 分档评分标准 ═══
+【熔断惩罚】
+- JD要资深/3年+而候选人应届：experience_relevance≤55
+- 核心硬技能每缺1项skill_match扣8，缺≥3项→skill_match≤50
+- 零量化：quantification_level≤50；仅1-2处：≤65
+- 口水话≥5次且量化<3处：experience_relevance-10，不得≥75
 
-【90-100 · 极致匹配】
-· 背景完全对口：专业方向、领域经验、项目类型与 JD 高度吻合
-· 同类一线商业项目实战成果，具备全流程设计/落地经验
-· JD 核心技能覆盖率 ≥ 90%，每个关键技能均有深度体现
-· STAR 成果数据详实：多个量化指标，数字精确、逻辑闭环
+【加权公式】match_score = skill_match*0.4 + experience_relevance*0.4 + quantification_level*0.2，取整。三维度差值≥5。
 
-【75-89 · 资深强相关】
-· 具备垂直相关领域的正式工作经历（2 年+），有完整业务链路经验
-· JD 核心技能覆盖 75%~85%，关键技能基本具备但深度稍欠
-· 有清晰的业务量化产出（如"提升 X%"、"处理 Y 万数据"）
-· 有 1-2 个项目能体现核心能力，但非完美匹配
+【硬约束】
+- 严禁捏造数字/金额，缺则 [X] 占位（本阶段不需要具体数字）
+- missing_keywords 仅列 JD 真实关键词，优先列核心硬技能（如 RAG/Agent/LangChain/向量库）
+- project_strategy 三类各 1-2 条，简短直接，不展开
+- summary 必须为一句话，60字以内，精准画像
+- 【一致性红线】summary 中若出现数字分数（如「XX分」），该数字必须严格等于本次实际 match_score！严禁写死「76分」「85分」等示例数字。画像分档必须落在 match_score 对应的档位（90-100/75-89/55-74/30-54/0-29）
+- 纯 JSON，无 markdown 包裹，可 JSON.parse
+- 不要任何 suggestions 字段！不要任何建议型描述！
+- 输出尽量短，max_tokens 2000 即可`;
 
-【55-74 · 潜力应届/轻度对齐】
-· 专业或基础能力与 JD 相关，具备 1-2 个垂直方向的课设或高完整度个人项目
-· JD 核心技能覆盖 50%~70%，但缺乏工业级落地经验
-· 有少量量化指标或结果，但不够系统
-· 典型：应届生/初级工程师，有潜力但经验不足
+// ==================== 阶段二 Prompt（深度 STAR 建议体系 ~8s） ====================
+// 携带画像上下文，只生成 suggestions 数组
+export const PHASE2_PROMPT = `你是「简历病灶 STAR 精修专家」，只生成 suggestions 数组，不重复评分与战略。
 
-【30-54 · 弱匹配/小白背景】
-· 缺少垂直实操经历（仅有传统 CRUD/社团活动/泛泛课设）
-· JD 核心要求大面积缺失（如要求 RAG/Agent 但简历全无）
-· 描述多为口水话：大量"负责"、"参与"等模糊表述，无具体动作
-· 无任何量化成果，通篇空泛
+【输出唯一字段】
+{ "suggestions": [  {  ...  },  ...  ] }
 
-【0-29 · 完全不匹配】
-· 专业背景与岗位职责无任何交叉
-· 核心技能、领域经验全部缺失
-· 简历经历与岗位要求完全无关
-
-═══ 硬性熔断与惩罚机制 ═══
-
-【经历层级熔断】
-· 若 JD 明确要求"资深/高级/主任/专家"或"3 年以上工作经验"等商业落地要求，而候选人仅为无经验应届生/校内经历：
-  → experience_relevance 严禁超过 55 分（上限封顶）
-  → 即使其他维度不错，此维度必须真实反映层级差距
-
-【核心技能缺漏惩罚】
-· 识别 JD 中明确列出的核心硬技能（如 Prompt Engineering、RAG 知识库搭建、Agent 框架、向量数据库、Fine-tuning 等）
-· 简历中每缺失一项关键技术 → skill_match 硬扣 8 分
-· 若核心技能缺失超过 3 项 → skill_match 不超过 50 分
-
-【无量化成果惩罚】
-· 检查简历项目/经历中是否有具体百分比、数字、金额等量化成果
-· 若通篇无任何量化指标 → quantification_level 严禁超过 50 分
-· 若仅 1-2 处有零星数字 → quantification_level 上限 65 分
-
-【口水话惩罚】
-· 若项目描述大量使用"负责"、"参与"、"协助"而无具体动作和结果
-· → 对应维度扣 10-15 分，且不得进入 75+ 档位
-
-═══ 综合分计算公式 ═══
-match_score = skill_match × 0.4 + experience_relevance × 0.4 + quantification_level × 0.2
-四舍五入取整。三个维度分加起来不直接等于 match_score，后者是加权结果。
-
-═══ 评分执行流程 ═══
-1. 先分别评估三个维度的原始得分（严格套用分档标准）
-2. 再应用熔断与惩罚机制进行调整（关键！）
-3. 最后用加权公式计算 match_score
-4. 写入 score_breakdown 和 dimensions
-
-【核心规则 · 严禁幻觉】
-1. 严禁凭空捏造任何具体的业务数据、百分比、金额、用户数等量化指标。
-2. 改写建议中需要量化数据但原简历未提供时，必须使用 [X] 占位符。
-3. 所有项目名称、公司名称、技术栈必须来自用户提供的简历原文。
-4. 改写时保留真实信息，只优化措辞、补充关键词、调整结构。
-5. missing_keywords 严格来源于 JD 真实关键词。
-
-【深度匹配规则】
-1. 深入挖掘 JD 隐性要求：岗位层级、业务领域、团队文化。
-2. 改写建议必须针对性回应具体内容，避免空洞套话。
-3. summary 精准定位 2-3 个匹配亮点和 2-3 个关键差距。
-
-【病灶分流引擎 · Triage Strategy · 核心】
-suggestions 支持三种类型：rewrite（现有经历精修）、new_project_blueprint（实战项目蓝图）、section_addition（缺失核心板块补齐）。
-**严禁使用固定模板（如"1 条精修 + 1 条蓝图 + 1 条补充"）！** 你必须先对候选人进行【画像分型诊断】，再根据画像执行差异化的处方生成策略。
-
-═══ 第一步：画像分型诊断 ═══
-基于 match_score、经历层级、量化密度、技术栈对齐度，将候选人归入 A / B / C 三种画像之一：
-
-═══ 画像 A · 资深转型 / 经历丰富型（match_score ≥ 75 分）═══
-· 病灶特征：已有扎实的行业经历或大厂经历，但描述缺乏 AI 术语、未对准当前 JD、或叙事重心错位。
-· 处方生成策略：
-  * **严禁推荐任何"自建玩具项目蓝图"！** 候选人不需要从 0 到 1 的入门项目，那会侮辱其资历。
-  * 输出 **4 ~ 6 条【现有经历 STAR 深度精修（rewrite）】**：深入挖掘候选人原简历中每一段核心工作/项目，逐条重构为高阶 STAR 架构（突出技术决策权、跨团队推动规模、业务影响力）。
-  * 输出 **1 条【岗位针对性个人优势提炼（section_addition）】**：帮候选人提炼一段 80~120 字的"个人简介 / 核心优势"，精准对齐 JD 的层级要求。
-  * 总条数必须为 **5 ~ 7 条**。
-  * 风格：高阶、专业、决策视角，避免学生气。
-
-═══ 画像 B · 有潜力但缺乏量化 / 对齐较弱型（match_score 60 ~ 74 分）═══
-· 病灶特征：做过相关事情，但通篇口水话（"负责"、"参与"、"协助"），缺乏数字量化与核心技术栈名词。
-· 处方生成策略：
-  * 输出 **3 ~ 4 条【量化成果注入精修（rewrite）】**：重点使用 \`[X%]\`、\`[X 万]\`、\`[X s]\` 占位符引导业务指标，将模糊描述重构为 STAR 量化叙事。
-  * 输出 **1 个【🔥 高价值实战项目升级蓝图（new_project_blueprint）】**：教候选人如何把现有的"小作业 / 课设 / CRUD 项目"**升级**为具备工业级技术栈（如 RAG、向量检索、Agent、评测基线）的大项目，而非从 0 到 1 重建。
-  * 输出 **1 ~ 2 条【关键技能鸿沟补齐（section_addition）】**：针对 JD 中候选人缺失的核心技能树，给出可直接抄入简历的"专业技能"板块。
-  * 总条数必须为 **5 ~ 7 条**。
-
-═══ 画像 C · 零基础小白 / 空白经历型（match_score < 60 分）═══
-· 病灶特征：简历严重缺乏对口经历（仅有社团活动、非相关课程、传统行业实习）。
-· 处方生成策略：
-  * 必须输出 **2 ~ 3 个【🔥 0 到 1 顶尖实战项目落地蓝图（new_project_blueprint）】**：针对该 JD 量身规划可落地的 Side Project（如大模型微调 / RAG 知识库 / Agent 系统 / Prompt 评测平台等），提供详实、可直接抄作业的 STAR 完整模板。
-    - 每个蓝图必须包含：项目背景痛点 → 技术方案（框架+核心组件）→ 完整 STAR 描述（可直接填写）→ 量化指标框架 → 动手步骤清单。
-    - 量化数据统一使用 \`[X]\` 占位符。
-  * 输出 **2 条【核心技能路线指南（section_addition）】**：针对 JD 中候选人缺失的两大硬技能方向（如 LangChain/RAG、Agent 评测等），分别给出可直接抄入简历的"专业技能"板块内容（含工具选型与学习路径）。
-  * 输出 **1 条【个人定位重塑（section_addition）】**：基于目标 JD 帮候选人重构一段 80~120 字的"自我评价 / 个人简介"，明确转型方向、差异化优势与可落地能力，避免空洞套话。
-  * 总条数必须为 **5 ~ 8 条**（2~3 蓝图 + 2 技能指南 + 1 个人定位 = 5~6 条为主，画像极弱时可扩展）。
-  * 风格：手把手教学，明确工具选型与评测方法。
-
-═══ 第二步：针对性深度约束（所有画像通用）═══
-1. **每一条建议必须指名道姓针对当前 JD 的具体要求**：
-   - 不要泛泛而谈"提升技能"，而要明确引用 JD 原文中的关键词（如"跨团队推动"、"RAGAS 评测"、"NPS 提升 [X]%"、"ABR 检索召回率"等）。
-   - rewrite 的 reason 字段必须指出该改写对应 JD 哪一条职责/要求。
-   - blueprint 的 reason 必须说明该蓝图如何填补 JD 中哪一项核心能力缺口的空白。
-2. **彻底打破固定 3 条的限制**：根据病灶严重程度动态输出 5 ~ 8 条不同类型的建议卡片。
-3. 严禁只修改"主修课程""教育背景"等无关痛痒的细节。
-4. 严禁捏造具体成绩（如"数据结构 94/100"），需要用户补充时统一用 \`[X]\` 占位符。
-5. 严禁对画像 A 输出 blueprint；严禁对画像 C 只输出 1 条 blueprint。
-
-═══ 每条建议的 type 字段说明 ═══
-
-【new_project_blueprint · 0到1 实战项目蓝图】
-- 适用于：简历缺失关键项目经历，但 JD 明确要求
-- original 统一写"原简历缺失"
-- **improved 必须是纯字符串（string），严禁输出对象 {} 或数组 []！** 必须用 \\n 换行符连接以下 STAR 模块：
-  * 第 1 行：【推荐项目名称】：<具体项目名，对齐 JD 业务场景>
-  * 第 2 行：- 背景与痛点：<针对具体行业/场景痛点，解释为什么需要这个项目>
-  * 第 3 行：- 核心行动与技术方案：<主导设计什么架构/管道/模块，用了什么框架/模型/技术栈>
-  * 第 4 行：- 成果与量化表达：<将专业指标提升至 [X]%，首字响应耗时降低至 [X]s，沉淀 [X] 份核心业务文档>
-  * 第 5 行：- 动手步骤：<列出 2-3 步具体落地指引，如工具选型、数据准备、评测验证>
-- **reason 必须是纯字符串，必须含【动手落地步骤】具体指引**（工具选型 + 评测验证 + 占位符替换提醒）
-- category_tag 用「🔥 推荐自建实战项目蓝图」
-
-【section_addition · 关键板块补充】
-- 适用于：简历缺失整个板块（如专业技能、自我评价、技术栈清单）
-- original 写"原简历缺失"
-- **improved 必须是纯字符串**，必须给出丰满、具体、可用的完整板块内容（3-5 个要点，用 \\n 换行连接），杜绝一句话敷衍
-- **reason 必须是纯字符串**，说明该板块对匹配度的提升作用与如何补充
-- category_tag 用「💡 关键板块补充」
-
-【rewrite · 现有经历精修】
-- 适用于：简历中已有的经历描述
-- **improved 必须是纯字符串**，给出 STAR 改写后的完整描述（含 [X] 占位符）
-- **reason 必须是纯字符串**，解释为什么这样改、对应 JD 哪个关键词
-- section 标注对应板块
-
-═══ Few-Shot 示范（必须严格遵以此字符串格式，严禁输出对象！）═══
-
-【示范 1：new_project_blueprint 类型】
+【suggestion item 结构】
 {
-  "type": "new_project_blueprint",
-  "category_tag": "🔥 推荐自建实战项目蓝图",
-  "section": "项目经历（建议新增）",
-  "original": "原简历缺失",
-  "improved": "【推荐项目名称】基于 RAG + LangChain 的垂直行业智能知识库\\n- 背景与痛点：针对法律/医疗等垂直领域文档检索匹配度低、大模型回答幻觉率高的问题，决定自建一套可落地的知识库问答系统。\\n- 核心行动与技术方案：主导设计 Hybrid Search（BM25 + BGE Embedding）双路召回管道，引入 BGE-Reranker 进行二阶段重排；搭建 Prompt 模板库与防幻觉评测基线。\\n- 成果与量化表达：将专业问答 Top-3 召回准确率提升至 [X]%，首字响应耗时降低至 [X]s，沉淀 [X] 份核心业务文档。\\n- 动手步骤：1) 工具选型：可使用 Dify / FastGPT 搭建原型接入本地知识库；2) 数据准备：收集 50-100 条业务文档与 30 条测试集；3) 评测验证：对比微调前后 Top-K 准确率，将量化数据填入 [X] 占位符后直接放入简历项目栏。",
-  "reason": "建议行动路径：\\n1. 工具选型：无需写复杂代码，可直接使用 Dify / FastGPT 搭建原型并接入本地知识库；\\n2. 数据准备：收集 50 条业务文档和 30 条测试问答对，作为评测基线；\\n3. 评测验证：对比微调/重排前后 Top-K 准确率，将数据填入 [X] 占位符后可直接放入简历项目栏。\\n该蓝图直接对应 JD 中『RAG/Agent 系统技术选型与落地』『Prompt Engineering 优化』两项核心职责，可填补简历垂直经历的空白。"
+  "type": "rewrite" | "new_project_blueprint" | "section_addition",
+  "category_tag": "🔥 推荐自建实战项目蓝图" | "✏️ 现有描述精修" | "💡 关键板块补充",
+  "section": "精确标注：如「项目经历(第1段)」「个人简介」「项目经历·新增」「专业技能板块·新增」",
+  "original": "简历原文对应片段，若为新增则写「原简历缺失」",
+  "improved": "纯字符串，多行用 \\\\n 分隔；严禁对象/数组！",
+  "reason": "纯字符串；80-150字，对应JD哪项+怎么干（工具/数据/验证步骤）"
 }
 
-【示范 2：section_addition 类型】
-{
-  "type": "section_addition",
-  "category_tag": "💡 关键板块补充",
-  "section": "专业技能（建议新增）",
-  "original": "原简历缺失",
-  "improved": "• 大模型应用：熟悉 LLM/RAG/Agent 核心架构，了解 Prompt Engineering 与 Function Calling\\n• 检索增强：掌握向量数据库（Milvus/Pinecone）与 Embedding 模型选型\\n• 开发框架：LangChain / LlamaIndex 基础使用经验\\n• 数据评估：具备搭建 LLM 评测基线、Top-K 准确率/BLEU/ROUGE 指标计算能力\\n• 产品设计：熟悉 Axure / Figma，能独立完成 AI 产品 PRD 与交互原型",
-  "reason": "该板块补齐后可直接覆盖 JD 中『熟悉 LLM、RAG、向量数据库』『LangChain、LlamaIndex』『Prompt Engineering』等硬性要求，建议将上述技能与个人项目蓝图关联起来证明可落地，会显著提升技能对齐度。"
-}
+【画像分流规则（关键！严格配比数量和类型）】
+根据提供的画像诊断分流：
+- 画像A（match_score≥75）：**严禁任何 blueprint**！
+  4-6条 rewrite（高阶STAR+决策权/跨团队/业务影响，用[X%]占位量化） + 1条 section_addition（80-120字对齐JD层级的个人优势提炼）= 合计5-7条
+- 画像B（60≤score<75）：
+  3-4条 rewrite（量化注入+[X%][X万][Xs]占位） + 1条 blueprint（把现有小项目升级为工业级：RAG/Agent/向量库/评测基线） + 1-2条 section_addition（补缺失的核心技能树）= 合计5-7条
+- 画像C（score<60）：
+  2-3条 blueprint（0到1 STAR完整模板：背景→技术方案→可填STAR→[X]量化框架→2-3步落地） + 2条 section_addition（2大硬技能方向，含工具选型+学习路径） + 1条 section_addition（80-120字个人定位重塑） = 合计5-8条
 
-【示范 3：rewrite 类型】
-{
-  "type": "rewrite",
-  "category_tag": "✏️ 现有描述精修",
-  "section": "工作经历：某贸易公司 销售实习生",
-  "original": "负责跟进客户订单流程，协助整理销售数据报表",
-  "improved": "主导客户订单全流程跟进（接单-履约-售后），搭建 Excel 数据透视表将周报制作时间从 [X] 小时压缩至 [X] 小时，月度协助处理订单 [X] 单、客户满意度 [X]%。",
-  "reason": "原句仅用『负责』『协助』等口水词，缺乏量化与主动语态。改写后引入『主导』动词提升层级感，补充订单量、耗时压缩、满意度三项量化指标，间接呼应 JD 中『需求分析与产品设计』所需的数据洞察力。"
-}
+【improved格式】
+- rewrite：STAR结构改写后的单段（~100-180字），用[X]占位缺的数字
+- blueprint：纯字符串，5行，每行前缀清晰：
+  第1行【推荐项目名称】：xxx
+  第2行- 背景与痛点：xxx
+  第3行- 核心行动与技术方案：xxx
+  第4行- 成果与量化表达：[X%]/[X]
+  第5行- 动手步骤：3步落地
+- section_addition：3-5条要点，用 \\\\n- 连接
 
-═══ 字段类型硬约束（再次强调）═══
-所有 suggestion 的 improved、original、reason 字段必须是 JSON string 类型！
-- ✅ 正确："improved": "第一行\\n第二行"
-- ❌ 错误："improved": { "title": "...", "bullets": [...] }
-- ❌ 错误："improved": ["...", "..."]
-若内容需多行展示，必须使用 \\n 换行符连接，前端会自动渲染分行。
+【通用规则】
+- 每条 improved 120-220字，reason 80-150字，杜绝套话
+- 每条建议必须指名道姓引用 JD 原文关键词（如 RAG/LangChain/评测/Top-K）
+- 画像A绝无 blueprint；画像C blueprint≥2
+- 所有公司名/项目名/技术栈必须来自简历或 JD
+- 缺数字统一 [X] / [X%] / [X 万] / [X s] 占位，严禁捏造
+- 纯字符串，禁止 improved/reason 是对象/数组
+- 只输出 JSON，无 markdown 包裹；不输出任何非 suggestions 字段
 
-【逐段遍历与颗粒度要求】
-1. rewrite 类型必须针对具体某句/某段原话改写，严禁笼统概括
-2. blueprint 类型必须包含完整技术栈、架构说明和可直接填写的 STAR 模板
-3. 所有类型严格遵循 STAR 原则，缺少量化指标用 [X]、[X%] 占位
-4. reason 必须给出行动指南：不仅说"为什么"，还要说"怎么动手"
-5. **improved 和 reason 必须是 JSON 字符串（string）类型，严禁是对象 {} 或数组 []！必须用 \\n 换行符连接多行内容**
+【输入上下文】下方将提供：画像诊断结果（score/dimensions/missing_keywords）、原文简历、目标JD、额外素材。请严格按画像分流配比生成。`;
 
-【输出格式要求】
-1. match_score 和 dimensions 必须严格遵循 Rubric 评分量规
-2. 三个维度之间必须拉开差距（≥ 5 分）
-3. missing_keywords 全部来自 JD 真实关键词
-4. project_strategy 至少各给出 1 条
-5. suggestions 的 type 和 category_tag 字段必须准确，类型配比遵循动态规则
-6. 严禁捏造具体成绩（如"数据结构 94/100"），需要补充时用 [X] 占位符
-7. 所有字段中文，风格专业、简洁、操作导向
-8. 必须输出纯 JSON 对象，严禁使用 \`\`\`json 代码块包裹，不要任何 markdown 格式
-9. 输出内容必须完整，不要中途截断；JSON 必须可被 JSON.parse 直接解析`;
+// ==================== 单请求合并 Prompt（兼容 analyzeResume 旧 API） ====================
+export const COMBINED_PROMPT = PHASE1_PROMPT.replace(
+  "不要任何 suggestions 字段！不要任何建议型描述！",
+  ""
+).replace(
+  "输出尽量短，max_tokens 2000 即可",
+  ""
+) + "\n\n除此之外，额外附上" + PHASE2_PROMPT.split("根据提供的画像诊断")[0]
+  .replace("{ \"suggestions\": [  {  ...  },  ...  ] }", "suggestions:[...]")
+  .replace("【画像分流规则（关键！严格配比数量和类型）】\n根据提供的画像诊断分流：\n", "")
+  .replace("画像A（match_score≥75）", "画像A（match_score≥75）") + "请同时填充 suggestions 字段（按上方面板分流）。完整输出一份包含 match_score/dimensions/summary/missing_keywords/project_strategy/suggestions 的合并 JSON。";
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
@@ -307,7 +194,8 @@ function extractJson(raw: string): any {
   }
 }
 
-function isValidResult(obj: any): boolean {
+/** 阶段一校验：必须有 match_score + dimensions + missing_keywords + project_strategy；suggestions 可选 */
+function isValidPhase1Result(obj: any): boolean {
   if (!obj || typeof obj !== "object") return false;
   if (typeof obj.match_score !== "number") return false;
   const d = obj.dimensions || obj.score_breakdown;
@@ -319,15 +207,26 @@ function isValidResult(obj: any): boolean {
   )
     return false;
   if (!Array.isArray(obj.missing_keywords)) return false;
-  if (obj.project_strategy && typeof obj.project_strategy === "object") {
-    const ps = obj.project_strategy;
-    if (
-      !Array.isArray(ps.recommended_additions) ||
-      !Array.isArray(ps.recommended_removals) ||
-      !Array.isArray(ps.project_pivots)
-    )
-      return false;
-  }
+  const ps = obj.project_strategy;
+  if (!ps || typeof ps !== "object") return false;
+  if (
+    !Array.isArray(ps.recommended_additions) ||
+    !Array.isArray(ps.recommended_removals) ||
+    !Array.isArray(ps.project_pivots)
+  )
+    return false;
+  return true;
+}
+
+/** 阶段二校验：仅含 suggestions 数组 */
+function isValidSuggestionsOnly(obj: any): obj is { suggestions: any[] } {
+  if (!obj || typeof obj !== "object") return false;
+  return Array.isArray(obj.suggestions);
+}
+
+/** 完整结果校验（用于 analyzeResume 合并 API 与兜底合并校验） */
+function isValidResult(obj: any): boolean {
+  if (!isValidPhase1Result(obj)) return false;
   if (!Array.isArray(obj.suggestions)) return false;
   return true;
 }
@@ -554,6 +453,101 @@ function calibrateScores(raw: any, resume: string, jd: string): any {
   return raw as AnalysisResult;
 }
 
+/** 仅用于阶段二：补齐 suggestions 类型字段 */
+function fixSuggestionsFields(arr: any[]): any[] {
+  if (!Array.isArray(arr)) return [];
+  for (const s of arr) {
+    if (!s.type) {
+      s.type = String(s.original || "").includes("缺失")
+        ? "section_addition"
+        : "rewrite";
+    }
+    if (!s.category_tag) {
+      if (s.type === "new_project_blueprint")
+        s.category_tag = "🔥 推荐自建实战项目蓝图";
+      else if (s.type === "section_addition")
+        s.category_tag = "💡 关键板块补充";
+      else s.category_tag = "✏️ 现有描述精修";
+    }
+  }
+  return arr;
+}
+
+/**
+ * 智能清洗 summary 中的不一致分数
+ *
+ * 检测 summary 文本中出现的「XX分」「XX 百分」等数字分数，若与实际 match_score 不一致，
+ * 自动替换为真实 match_score，确保圆环显示数字与摘要文字 100% 对齐一致。
+ *
+ * 同时若 summary 缺失分数而画像档位与实际 score 不符，会前置正确的档位标签。
+ */
+export function cleanSummaryMismatch(summary: string, matchScore: number): string {
+  if (!summary || typeof summary !== "string") return summary || "";
+  const score = Math.round(matchScore);
+  const scoreStr = String(score);
+
+  // 档位判定
+  const correctBand =
+    score >= 90
+      ? "极致匹配型"
+      : score >= 75
+        ? "资深型"
+        : score >= 55
+          ? "潜力型"
+          : score >= 30
+            ? "弱匹配型"
+            : "完全不对口型";
+
+  // 1) 替换所有"N分"中的不一致分数
+  // 匹配 0-100 后紧跟「分」的数字
+  let cleaned = summary.replace(/(\d{1,3})\s*分/g, (full, numStr: string) => {
+    const n = parseInt(numStr, 10);
+    if (n >= 0 && n <= 100 && n !== score) {
+      return `${scoreStr}分`;
+    }
+    return full;
+  });
+
+  // 2) 替换"N分"N/N百分 形式（仅当不一致）
+  cleaned = cleaned.replace(
+    /(\d{1,3})\s*(?:%|百分|百分点)/g,
+    (full, numStr: string) => {
+      const n = parseInt(numStr, 10);
+      if (n >= 0 && n <= 100 && n !== score) {
+        return `${scoreStr}%`;
+      }
+      return full;
+    }
+  );
+
+  // 3) 若 summary 中已无任何「N分」字样，但开头出现错误档位（如「资深型」「极致匹配型」等），
+  //    且与 score 不符，则替换档位为正确档位
+  const bandPatterns: Array<{ pattern: RegExp; band: string }> = [
+    { pattern: /极致匹配型?/, band: "极致匹配型" },
+    { pattern: /资深型|资深潜力型/, band: "资深型" },
+    { pattern: /潜力型|潜力应届型?/, band: "潜力型" },
+    { pattern: /弱匹配型?/, band: "弱匹配型" },
+    { pattern: /完全不对口型?|不匹配型?/, band: "完全不对口型" },
+  ];
+
+  const mentionedBand = bandPatterns.find((b) => b.pattern.test(cleaned));
+  if (mentionedBand && mentionedBand.band !== correctBand) {
+    // 替换为正确档位
+    cleaned = cleaned.replace(mentionedBand.pattern, correctBand);
+  }
+
+  // 4) 若清洗后 summary 仍以非档位词开头但 match_score 极端（<30 或 ≥90），
+  //    前置档位标签以强调一致性
+  const startsWithBand = bandPatterns.some((b) =>
+    new RegExp("^\\s*" + b.pattern.source).test(cleaned)
+  );
+  if (!startsWithBand && (score < 30 || score >= 90)) {
+    cleaned = `${correctBand}：${cleaned.replace(/^[\u4e00-\u9fa5]+?[：:]/, "")}`;
+  }
+
+  return cleaned;
+}
+
 /**
  * 获取智谱 API Key
  * 优先级：VITE_ZHIPU_API_KEY 环境变量 → localStorage 缓存 → 默认值
@@ -598,38 +592,17 @@ export function clearApiKey(): void {
 
 const ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
 
-/**
- * 调用智谱 GLM-4-Flash 进行简历-JD 分析
- *
- * @returns 完整的 AnalysisResult，包含校准后的分数与多元化建议
- * @throws Error 含用户友好的错误消息（API Key 缺失 / 网络异常 / 模型返回无效）
- */
-export async function analyzeResume(
-  resume: string,
-  jd: string,
-  extraProjects: string
-): Promise<AnalysisResult> {
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    throw new Error(
-      "未配置智谱 API Key。请在环境变量 VITE_ZHIPU_API_KEY 中设置，或在浏览器中通过设置面板配置。"
-    );
-  }
-
-  const userPrompt = [
-    "请基于以下信息进行深度对齐分析：",
-    "",
-    "═══ 简历原文 ═══",
-    resume.trim(),
-    "",
-    "═══ 目标岗位 JD ═══",
-    jd.trim(),
-    "",
-    "═══ 未写入简历的额外项目/经历素材（可选）═══",
-    extraProjects.trim() || "（无）",
-  ].join("\n");
-
-  const makeCall = async (model: string) =>
+// 轻量公共 fetch 封装：调用智谱 chat.completions，带模型回退
+async function callZhipu(
+  apiKey: string,
+  {
+    systemPrompt,
+    userText,
+    maxTokens,
+    temp,
+  }: { systemPrompt: string; userText: string; maxTokens: number; temp: number }
+): Promise<{ content: string }> {
+  const doFetch = async (model: string) =>
     fetch(ZHIPU_URL, {
       method: "POST",
       headers: {
@@ -639,51 +612,36 @@ export async function analyzeResume(
       body: JSON.stringify({
         model,
         messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userPrompt },
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userText },
         ],
-        temperature: 0.3,
-        max_tokens: 8192,
+        temperature: temp,
+        max_tokens: maxTokens,
         stream: false,
         response_format: { type: "json_object" },
       }),
     });
 
-  console.log("[aiService] 调用智谱主模型 glm-4-flash");
-  const startTime = Date.now();
-
   let resp: Response;
   try {
-    resp = await makeCall("glm-4-flash");
+    resp = await doFetch("glm-4-flash");
   } catch (e: any) {
     throw new Error(
       `网络异常：无法连接到智谱 API（${e?.message || "未知错误"}）。请检查网络后重试。`
     );
   }
-
-  // 主模型失败 → 尝试回退模型
   if (!resp.ok) {
-    const errText = await resp.text().catch(() => "");
-    console.error(
-      `[aiService] 主模型失败: HTTP ${resp.status}`,
-      errText.slice(0, 300)
-    );
-
-    // 401 / 403 → API Key 问题，不再尝试回退
     if (resp.status === 401 || resp.status === 403) {
       throw new Error(
         `智谱 API Key 无效或权限不足（HTTP ${resp.status}）。请检查 VITE_ZHIPU_API_KEY 配置。`
       );
     }
-
-    // 其他错误 → 尝试回退模型
     let resp2: Response | null = null;
     try {
-      resp2 = await makeCall("glm-4-flash-turbo");
+      resp2 = await doFetch("glm-4-flash-turbo");
     } catch (_) {
-      // ignore，下面统一处理
+      /* ignore */
     }
-
     if (!resp2 || !resp2.ok) {
       const code = resp2 ? resp2.status : "timeout";
       throw new Error(
@@ -698,27 +656,247 @@ export async function analyzeResume(
     data?.choices?.[0]?.message?.content ??
     data?.choices?.[0]?.delta?.content ??
     "";
+  if (!content) throw new Error("智谱 API 返回内容为空，请稍后重试。");
+  return { content };
+}
 
-  if (!content) {
-    throw new Error("智谱 API 返回内容为空，请稍后重试。");
+// 真实阶段状态驱动：仅更新 status/detail；progress 不在此处硬跳，
+// 改由 AgentPipeline 的 S-curve 平滑曲线统一驱动（避免进度条暴跳）
+const PROGRESS_AUTO = -1;
+function stage(
+  cb: PipelineStageCallback | undefined,
+  stageId: PipelineStageId,
+  status: "pending" | "active" | "done",
+  detail: string
+): void {
+  if (!cb) return;
+  cb({ stageId, status, detail, progress: PROGRESS_AUTO });
+}
+
+function initStages(cb: PipelineStageCallback | undefined): void {
+  stage(cb, 1, "active", PIPELINE_STAGES[0].activeText);
+  stage(cb, 2, "pending", "");
+  stage(cb, 3, "pending", "");
+  stage(cb, 4, "pending", "");
+}
+
+// 返回用于 Types.Suggestion 的类型
+type SuggestionArray = AnalysisResult["suggestions"];
+
+export interface Phase1Result {
+  match_score: number;
+  score_breakdown: { skill_match: number; experience_relevance: number; quantification_level: number };
+  dimensions: { skill_match: number; experience_relevance: number; quantification_level: number };
+  summary: string;
+  missing_keywords: string[];
+  project_strategy: AnalysisResult["project_strategy"];
+  _calibration_meta?: AnalysisResult["_calibration_meta"];
+}
+
+/**
+ * 阶段一 · 宏观人岗对齐诊断（Fast <3s）
+ * 真实 Promise 驱动节点 1/2/3 的 active → done。
+ */
+export async function analyzePhase1(
+  resume: string,
+  jd: string,
+  extraProjects: string,
+  onPipelineStage?: PipelineStageCallback
+): Promise<Phase1Result> {
+  initStages(onPipelineStage);
+  // 阶段1请求开始：节点1 active，并激活节点2/3 pending→active（语义比对并行在LLM内）
+  stage(onPipelineStage, 1, "active", PIPELINE_STAGES[0].activeText);
+  stage(onPipelineStage, 2, "active", PIPELINE_STAGES[1].activeText);
+  stage(onPipelineStage, 3, "active", PIPELINE_STAGES[2].activeText);
+
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    throw new Error(
+      "未配置智谱 API Key。请在环境变量 VITE_ZHIPU_API_KEY 中设置，或在浏览器中通过设置面板配置。"
+    );
   }
+
+  const userText = [
+    "【简历原文】",
+    resume.trim(),
+    "",
+    "【目标岗位 JD】",
+    jd.trim(),
+    "",
+    "【额外素材（可选）】",
+    extraProjects.trim() || "（无）",
+  ].join("\n");
+
+  const t0 = Date.now();
+  const { content } = await callZhipu(apiKey, {
+    systemPrompt: PHASE1_PROMPT,
+    userText,
+    maxTokens: 2400,
+    temp: 0.22,
+  });
 
   const parsed = extractJson(content);
-  if (!isValidResult(parsed)) {
-    console.error(
-      "[aiService] 模型返回 JSON 无效",
-      content.slice(0, 200),
-      "...",
-      content.slice(-200)
-    );
+  if (!isValidPhase1Result(parsed)) {
+    console.error("[aiService][P1] 无效JSON:", content.slice(0, 300));
+    throw new Error("阶段一诊断返回格式异常，请重试。");
+  }
+
+  // 前端校准：真实校准 _calibration_meta
+  const calibrated = calibrateScores(
+    {
+      ...parsed,
+      suggestions: [], // 占位避免 calibrateScores 内部 fallback 报警
+    },
+    resume,
+    jd
+  );
+  // 节点 1/2/3 微步级联打勾（400ms 间隔），填真实数据
+  // 节点 1 立即完成；节点 2 延迟 400ms；节点 3 延迟 800ms
+  const kw = calibrated.missing_keywords.length;
+  stage(onPipelineStage, 1, "done", `已提取 ${Math.max(3, kw)} 个硬技能与门槛指标`);
+  const adds = Math.max(
+    1,
+    calibrated.project_strategy.recommended_additions.length +
+      calibrated.project_strategy.project_pivots.length
+  );
+  window.setTimeout(
+    () => stage(onPipelineStage, 2, "done", `发现 ${adds} 个高 ROI 置换项目`),
+    400
+  );
+  const meta = calibrated._calibration_meta;
+  const fuseCount =
+    (meta?.senior_fuse_applied ? 1 : 0) +
+    ((meta?.missing_hard_skills ?? 0) > 0 ? 1 : 0) +
+    ((meta?.quant_count ?? 3) === 0 ? 1 : 0) +
+    ((meta?.vague_count ?? 0) >= 5 ? 1 : 0) +
+    1;
+  window.setTimeout(
+    () => stage(onPipelineStage, 3, "done", `命中 ${Math.min(6, fuseCount)} 项规则约束`),
+    800
+  );
+
+  // 把 suggestions 占位字段清掉再返回（避免污染）
+  const { suggestions: _ignored, ...rest } = calibrated;
+  console.log(
+    `[aiService][P1] 完成 ${Date.now() - t0}ms  score=${rest.match_score}`
+  );
+  return rest as Phase1Result;
+}
+
+/**
+ * 阶段二 · 深度 STAR 行动建议体系（~8s）
+ * 真实 Promise 驱动节点 4 的 active → done。
+ * 必须传入 phase1Result 画像上下文，作为分流依据。
+ */
+export async function analyzePhase2(
+  resume: string,
+  jd: string,
+  extraProjects: string,
+  phase1Result: Phase1Result | null,
+  onPipelineStage?: PipelineStageCallback
+): Promise<SuggestionArray> {
+  // 节点4立即激活（用户发起阶段二并行请求时）
+  stage(onPipelineStage, 4, "active", PIPELINE_STAGES[3].activeText);
+
+  const apiKey = getApiKey();
+  if (!apiKey) {
     throw new Error(
-      "AI 返回内容格式异常，无法解析为有效诊断结果。请重试，或简化简历/JD 文本后重试。"
+      "未配置智谱 API Key。请在环境变量 VITE_ZHIPU_API_KEY 中设置，或在浏览器中通过设置面板配置。"
     );
   }
 
-  const calibrated = calibrateScores(parsed, resume, jd) as AnalysisResult;
+  const score = phase1Result?.match_score ?? 0;
+  const dims = phase1Result?.dimensions ?? null;
+  const missing = phase1Result?.missing_keywords ?? [];
+  const addList =
+    phase1Result?.project_strategy?.recommended_additions ?? [];
+  const pivotList =
+    phase1Result?.project_strategy?.project_pivots ?? [];
+  const strategySummary = [
+    ...addList.map((x) => `增补: ${x.project_name}(${x.why_add || ""})`),
+    ...pivotList.map((x) => `重构: ${x.project_name}(${x.pivot_advice || ""})`),
+  ].join("；");
+
+  const userText = [
+    "【画像诊断结果（分流依据，请严格遵守数量/类型配比）】",
+    JSON.stringify(
+      {
+        match_score: score,
+        dimensions: dims,
+        missing_keywords: missing,
+      },
+      null,
+      0
+    ),
+    "",
+    "【战略看板摘要（便于P2对齐）】",
+    strategySummary || "（无）",
+    "",
+    "【简历原文】",
+    resume.trim(),
+    "",
+    "【目标岗位 JD】",
+    jd.trim(),
+    "",
+    "【额外素材（可选）】",
+    extraProjects.trim() || "（无）",
+  ].join("\n");
+
+  const t0 = Date.now();
+  const { content } = await callZhipu(apiKey, {
+    systemPrompt: PHASE2_PROMPT,
+    userText,
+    maxTokens: 6144,
+    temp: 0.26,
+  });
+
+  const parsed = extractJson(content);
+  if (!isValidSuggestionsOnly(parsed)) {
+    // 兼容：LLM 误返回整份 AnalysisResult（含 match_score）时，剥出 suggestions
+    const anyParsed = parsed as any;
+    if (
+      anyParsed &&
+      Array.isArray((anyParsed as any).suggestions) &&
+      (anyParsed as any).suggestions.length > 0
+    ) {
+      const fixed = fixSuggestionsFields((anyParsed as any).suggestions);
+      stage(onPipelineStage, 4, "done", "✅ 病灶分流处方生成完成");
+      console.log(
+        `[aiService][P2] fallback-compat 完成 ${Date.now() - t0}ms  suggestions=${fixed.length}`
+      );
+      return fixed as SuggestionArray;
+    }
+    console.error("[aiService][P2] 无效JSON:", content.slice(0, 400));
+    throw new Error("阶段二建议返回格式异常，请重试。");
+  }
+
+  const fixed = fixSuggestionsFields(parsed.suggestions);
+  stage(onPipelineStage, 4, "done", "✅ 病灶分流处方生成完成");
   console.log(
-    `[aiService] 分析完成，耗时 ${Date.now() - startTime}ms, match_score=${calibrated.match_score}`
+    `[aiService][P2] 完成 ${Date.now() - t0}ms  suggestions=${fixed.length}`
   );
-  return calibrated;
+  return fixed as SuggestionArray;
+}
+
+/**
+ * 合并式兼容 API（保持原有调用者不破）：P1 + P2 串行合并
+ */
+export async function analyzeResume(
+  resume: string,
+  jd: string,
+  extraProjects: string,
+  onPipelineStage?: PipelineStageCallback
+): Promise<AnalysisResult> {
+  const p1 = await analyzePhase1(resume, jd, extraProjects, onPipelineStage);
+  const suggestions = await analyzePhase2(
+    resume,
+    jd,
+    extraProjects,
+    p1,
+    onPipelineStage
+  );
+  return {
+    ...p1,
+    suggestions,
+  } as AnalysisResult;
 }

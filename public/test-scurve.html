@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>S-Curve 进度条丝滑性测试 · JobFit AI</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(135deg, #f5f5f7 0%, #e8e9ec 100%);
+    color: #1f2937;
+    min-height: 100vh;
+    padding: 40px 20px;
+  }
+  .container { max-width: 920px; margin: 0 auto; }
+  h1 {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    color: #111827;
+  }
+  .subtitle { font-size: 13px; color: #6b7280; margin-bottom: 28px; }
+
+  /* ====== 复刻 AgentPipeline.tsx 的卡片 + 进度条 ====== */
+  .pipeline-card {
+    background: rgba(255,255,255,0.7);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(229,231,235,0.8);
+    border-radius: 16px;
+    padding: 24px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.06);
+    margin-bottom: 24px;
+    transition: opacity 0.5s ease-out;
+  }
+  .pipeline-card.done-pulse { opacity: 0.9; }
+  .pipeline-card.hidden { display: none; }
+
+  .header-row { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+  .cpu-icon {
+    width: 36px; height: 36px; border-radius: 10px;
+    background: #E4EBF0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+  }
+  .title-block { flex: 1; min-width: 0; }
+  .title { font-size: 16px; font-weight: 700; color: #111827; }
+  .subtitle-text { font-size: 12px; color: #6b7280; margin-top: 2px; }
+
+  .timer-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px; border-radius: 9999px;
+    border: 1px solid;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px; font-weight: 600;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    font-variant-numeric: tabular-nums;
+  }
+  .timer-pill.running {
+    background: linear-gradient(90deg, #FAF3EB, #F4E7D2);
+    border-color: #e0cfb8;
+    color: #7a5f3a;
+  }
+  .timer-pill.done {
+    background: linear-gradient(90deg, #EAF0EB, #DCE8DF);
+    border-color: #c5d5cc;
+    color: #4a5c52;
+  }
+
+  /* ====== 进度条（1:1 复刻 AgentPipeline.tsx） ====== */
+  .progress-track {
+    position: relative;
+    height: 10px;
+    border-radius: 9999px;
+    background: #EDE8F0;
+    overflow: hidden;
+    margin-bottom: 20px;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.06);
+  }
+  .progress-fill {
+    position: absolute;
+    left: 0; top: 0;
+    height: 100%;
+    border-radius: 9999px;
+    transition: all 150ms ease-out;
+    background: linear-gradient(90deg, #4A6B82 0%, #6E8B74 50%, #C48B71 100%);
+    box-shadow: 0 0 12px rgba(74,107,130,0.45), 0 0 8px rgba(196,139,113,0.25);
+  }
+  .progress-shimmer {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    width: 80px;
+    pointer-events: none;
+    background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.55) 50%, transparent 100%);
+    animation: shimmer 1.5s infinite linear;
+  }
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+  .progress-pulse-glow {
+    position: absolute;
+    top: 0; right: 0;
+    height: 100%;
+    width: 8%;
+    border-radius: 9999px;
+    pointer-events: none;
+    background: radial-gradient(circle, rgba(196,139,113,0.6) 0%, transparent 80%);
+    animation: pulse-slow 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  @keyframes pulse-slow {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+  .progress-final-highlight {
+    position: absolute;
+    inset: 0;
+    border-radius: 9999px;
+    pointer-events: none;
+    background: linear-gradient(90deg, #4A6B82 0%, #6E8B74 50%, #C48B71 100%);
+    box-shadow: 0 0 18px rgba(110,139,116,0.7);
+    animation: fade-in 0.5s ease-out;
+  }
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  /* ====== 4 阶段节点 ====== */
+  .stages-grid {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+  }
+  @media (max-width: 768px) {
+    .stages-grid { grid-template-columns: 1fr; }
+  }
+  .stage-card {
+    position: relative;
+    border-radius: 16px;
+    padding: 14px;
+    border-width: 1.5px;
+    border-style: solid;
+    transition: all 300ms ease-out;
+  }
+  .stage-card.pending {
+    background: rgba(255,255,255,0.6);
+    border-color: #E4E3E8;
+    opacity: 0.8;
+  }
+  .stage-card.active {
+    background: linear-gradient(135deg, #F7F4EE, #FFFFFF);
+    border-color: #d8c5a8;
+    box-shadow: 0 6px 22px rgba(212,197,154,0.22);
+  }
+  .stage-card.done {
+    background: linear-gradient(135deg, #F2F6F3, #E9F1EA);
+    border-color: #b8ccbf;
+    box-shadow: 0 4px 18px rgba(150,165,151,0.12);
+  }
+  .stage-card.stage2-focus {
+    background: linear-gradient(135deg, #FBF4E6, #FFFFFF);
+    border-color: #c9a55c;
+    box-shadow: 0 10px 32px rgba(212,197,154,0.42);
+    transform: scale(1.025);
+  }
+
+  .stage-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .stage-icon {
+    position: relative;
+    width: 36px; height: 36px;
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px;
+    flex-shrink: 0;
+  }
+  .stage-icon.pending { background: linear-gradient(135deg, #ECEAEF, #DCD8E4); }
+  .stage-icon.active { background: linear-gradient(135deg, #E8DCC8, #d4c59a); }
+  .stage-icon.done { background: linear-gradient(135deg, #C8D8CC, #96a597); }
+  .stage-icon.stage2-focus { background: linear-gradient(135deg, #E5C97A, #b89060); transform: scale(1.1); }
+
+  .stage-icon-text { color: #fff; font-weight: 700; font-size: 14px; }
+  .pulse-ring {
+    position: absolute;
+    inset: 0;
+    border-radius: 12px;
+    pointer-events: none;
+    animation: pulse-ring 1.6s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+  }
+  @keyframes pulse-ring {
+    0% { transform: scale(0.85); opacity: 0.75; box-shadow: 0 0 0 0 rgba(212,197,154,0.55); }
+    70% { transform: scale(1.05); opacity: 0; box-shadow: 0 0 0 10px rgba(212,197,154,0); }
+    100% { transform: scale(1); opacity: 0; box-shadow: 0 0 0 0 rgba(212,197,154,0); }
+  }
+
+  .stage-title {
+    font-size: 12.5px; font-weight: 700;
+    line-height: 1.2;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .stage-title.pending { color: #6b7280; }
+  .stage-title.active { color: #7a5f3a; }
+  .stage-title.done { color: #4a5c52; }
+  .stage-title.stage2-focus { color: #7a4f1a; }
+  .stage-sub { font-size: 10px; color: #9ca3af; margin-top: 2px; }
+
+  .stage-status {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    border: 1px solid;
+    font-size: 11px; font-weight: 600;
+    min-height: 14px;
+  }
+  .stage-status.pending {
+    background: rgba(248,250,252,0.6); border-color: #e5e7eb; color: #9ca3af;
+  }
+  .stage-status.active {
+    background: rgba(250,243,235,0.8); border-color: #e0cfb8; color: #8a6b47;
+  }
+  .stage-status.done {
+    background: rgba(234,240,235,0.8); border-color: #c5d8cc; color: #4a5c52;
+  }
+  .stage-status.stage2-focus {
+    background: rgba(251,241,222,0.9); border-color: #d8b878; color: #7a4f1a;
+  }
+
+  /* ====== 控制台 ====== */
+  .control-panel {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 18px;
+    margin-bottom: 24px;
+  }
+  .control-row {
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+  }
+  .btn {
+    padding: 9px 16px;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 150ms ease-out;
+  }
+  .btn-primary {
+    background: linear-gradient(90deg, #4A6B82, #6E8B74);
+    color: #fff;
+  }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 14px rgba(74,107,130,0.3); }
+  .btn-success {
+    background: linear-gradient(90deg, #6E8B74, #96a597);
+    color: #fff;
+  }
+  .btn-success:hover { transform: translateY(-1px); box-shadow: 0 6px 14px rgba(110,139,116,0.3); }
+  .btn-warn {
+    background: linear-gradient(90deg, #C48B71, #d4a48a);
+    color: #fff;
+  }
+  .btn-warn:hover { transform: translateY(-1px); box-shadow: 0 6px 14px rgba(196,139,113,0.3); }
+  .btn-secondary {
+    background: #f3f4f6;
+    color: #374151;
+    border: 1px solid #d1d5db;
+  }
+  .btn-secondary:hover { background: #e5e7eb; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+
+  /* ====== 实时数据面板 ====== */
+  .metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .metric {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .metric-label {
+    font-size: 11px;
+    color: #6b7280;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+  .metric-value {
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 18px;
+    font-weight: 700;
+    color: #1f2937;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ====== 曲线图表 ====== */
+  .chart-card {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 18px;
+  }
+  .chart-card h3 { font-size: 13px; font-weight: 700; color: #374151; margin-bottom: 12px; }
+  canvas { width: 100%; height: 200px; display: block; }
+  .legend { font-size: 11px; color: #6b7280; margin-top: 8px; }
+  .legend-dot {
+    display: inline-block; width: 10px; height: 3px; border-radius: 2px;
+    vertical-align: middle; margin-right: 6px;
+  }
+
+  .help-block {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 18px;
+    font-size: 12px;
+    color: #6b7280;
+    line-height: 1.7;
+  }
+  .help-block code {
+    background: #f3f4f6;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    color: #4A6B82;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>S-Curve 进度条丝滑性测试</h1>
+  <p class="subtitle">1:1 复刻 AgentPipeline.tsx 逻辑 · 验证 60FPS rAF 驱动 + 100% 走满兜底</p>
+
+  <!-- 复刻的流水线卡片 -->
+  <div class="pipeline-card" id="pipeline-card">
+    <div class="header-row">
+      <div class="cpu-icon">🧠</div>
+      <div class="title-block">
+        <div class="title" id="title-text">点击下方「开始模拟」启动</div>
+        <div class="subtitle-text" id="subtitle-text">S-curve 平滑推进 · 60FPS rAF 驱动</div>
+      </div>
+      <div class="timer-pill" id="timer-pill">
+        <span id="timer-text">⏱️ 0.0s</span>
+      </div>
+    </div>
+
+    <!-- 进度条 -->
+    <div class="progress-track" id="progress-track">
+      <div class="progress-fill" id="progress-fill" style="width: 0%;"></div>
+      <div class="progress-shimmer" id="progress-shimmer" style="left: -12%; display: none;"></div>
+      <div class="progress-pulse-glow" id="progress-pulse-glow" style="display: none;"></div>
+      <div class="progress-final-highlight" id="progress-final-highlight" style="display: none;"></div>
+    </div>
+
+    <!-- 4 阶段 -->
+    <div class="stages-grid" id="stages-grid"></div>
+  </div>
+
+  <!-- 控制台 -->
+  <div class="control-panel">
+    <div class="control-row" style="margin-bottom: 12px;">
+      <button class="btn btn-primary" id="btn-start">▶ 开始模拟</button>
+      <button class="btn btn-success" id="btn-complete" disabled>✅ 模拟数据返回</button>
+      <button class="btn btn-warn" id="btn-fail" disabled>⚠ 模拟失败</button>
+      <button class="btn btn-secondary" id="btn-reset">↺ 重置</button>
+    </div>
+    <div class="control-row" style="font-size: 12px; color: #6b7280;">
+      <label style="display: flex; align-items: center; gap: 6px;">
+        自动触发完成于：
+        <input type="range" id="auto-complete-at" min="5" max="120" value="35" style="width: 160px;">
+        <span id="auto-complete-label" style="font-family: monospace; font-weight: 600; color: #4A6B82;">35s</span>
+      </label>
+      <label style="display: flex; align-items: center; gap: 6px; margin-left: 16px;">
+        <input type="checkbox" id="auto-complete-enabled" checked>
+        启用自动完成
+      </label>
+    </div>
+  </div>
+
+  <!-- 实时数据 -->
+  <div class="metrics-grid">
+    <div class="metric">
+      <div class="metric-label">已耗时</div>
+      <div class="metric-value" id="m-elapsed">0.0s</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">进度</div>
+      <div class="metric-value" id="m-progress">0%</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">当前阶段</div>
+      <div class="metric-value" id="m-stage" style="font-size: 14px;">未启动</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">FPS</div>
+      <div class="metric-value" id="m-fps">0</div>
+    </div>
+  </div>
+
+  <!-- 曲线图 -->
+  <div class="chart-card">
+    <h3>📈 S-Curve 时间-进度曲线（实时绘制）</h3>
+    <canvas id="chart" width="880" height="200"></canvas>
+    <div class="legend">
+      <span class="legend-dot" style="background: #4A6B82;"></span>真实进度
+      <span class="legend-dot" style="background: #C48B71; margin-left: 16px;"></span>预设节点
+    </div>
+  </div>
+
+  <!-- 帮助 -->
+  <div class="help-block" style="margin-top: 16px;">
+    <strong>测试要点：</strong><br>
+    1. 点击「开始模拟」启动 rAF 驱动的 S-curve 推进，观察进度条是否 60FPS 丝滑无跳跃。<br>
+    2. 在不同时间点点击「模拟数据返回」按钮，观察进度是否从当前值丝滑过渡到 <code>100%</code> 并保持 <code>2s</code> 后淡出。<br>
+    3. 拖动滑块设置自动完成时间（如 <code>35s</code>），观察从 <code>~60%</code> 到 <code>100%</code> 的过渡效果。<br>
+    4. 把自动完成时间拉到 <code>120s</code>，验证超长等待期 92→97% 的爬升是否丝滑，避免假死停滞。<br>
+    5. 期望曲线：<code>0~8s→25% / 8~50s→75% / 50~80s→92% / 80~120s→97% / 完成→100%</code>。
+  </div>
+</div>
+
+<script>
+// ==================== S-curve 计算（1:1 复刻 aiService.ts computeProgress）====================
+function computeProgress(elapsedMs, allDone) {
+  if (allDone) return 100;
+  const s = elapsedMs / 1000;
+  if (s < 0) return 0;
+  if (s < 8) return Math.max(0, Math.min(25, (s / 8) * 25));
+  if (s < 50) {
+    const t = (s - 8) / 42;
+    const eased = t * (2 - t);
+    return 25 + eased * 50;
+  }
+  if (s < 80) {
+    const t = (s - 50) / 30;
+    return 75 + t * 17;
+  }
+  if (s < 120) {
+    const t = (s - 80) / 40;
+    return 92 + t * 5;
+  }
+  return 97;
+}
+
+// ==================== 4 阶段定义（复刻 PIPELINE_STAGES）====================
+const PIPELINE_STAGES = [
+  { id: 1, icon: "🔍", title: "解构岗位 JD 核心能力画像", activeText: "解析中..." },
+  { id: 2, icon: "⚖️", title: "简历经历与素材库语义交叉比对", activeText: "比对中..." },
+  { id: 3, icon: "📊", title: "触发工业级 Rubric 量规打分与熔断检测", activeText: "计算中..." },
+  { id: 4, icon: "✍️", title: "执行病灶自适应分流与 STAR 逐段精修", activeText: "正在生成可落地的行动蓝图..." },
+];
+
+// ==================== 状态 ====================
+let state = {
+  running: false,
+  startMs: null,
+  endMs: null,
+  allDone: false,
+  donePulse: false,
+  hidden: false,
+  stages: [1,2,3,4].map(id => ({ id, status: "pending", detail: "" })),
+  // 模拟：阶段一在 ~8s 完成；阶段二在用户点击/自动完成时完成
+  p1CompletedAt: null,
+  p2CompletedAt: null,
+};
+
+let rafId = 0;
+let lastFrameTime = 0;
+let fpsCounter = 0;
+let fpsLastUpdate = 0;
+let currentFps = 0;
+let chartPoints = []; // {t, p} 真实进度采样
+
+// ==================== 渲染 ====================
+function renderStages() {
+  const grid = document.getElementById("stages-grid");
+  const stage1Concurrent = state.stages[0].status === "active" && state.stages[1].status === "active" && state.stages[2].status === "active";
+  const stage2Active = state.stages[0].status === "done" && state.stages[1].status === "done" && state.stages[2].status === "done" && state.stages[3].status === "active";
+
+  grid.innerHTML = state.stages.map((s, i) => {
+    const st = PIPELINE_STAGES[i];
+    const isDone = s.status === "done";
+    const isActive = s.status === "active";
+    const isStage2Focus = stage2Active && s.id === 4;
+    const isStage1Concurrent = stage1Concurrent && (s.id === 1 || s.id === 2 || s.id === 3);
+
+    const cardClass = isStage2Focus ? "stage-card stage2-focus" : `stage-card ${s.status}`;
+    const iconClass = isStage2Focus ? "stage-icon stage2-focus" : `stage-icon ${s.status}`;
+    const titleClass = isStage2Focus ? "stage-title stage2-focus" : `stage-title ${s.status}`;
+    const statusClass = isStage2Focus ? "stage-status stage2-focus" : `stage-status ${s.status}`;
+
+    const iconContent = isDone
+      ? `<span class="stage-icon-text">✓</span>`
+      : `<span>${st.icon}</span>`;
+    const ring = (isActive || isStage2Focus) ? `<span class="pulse-ring"></span>` : "";
+
+    let statusText;
+    if (s.status === "pending") statusText = "等待中...";
+    else if (isStage1Concurrent) statusText = "⚡ 并发多维计算中...";
+    else statusText = s.detail || (isDone ? "已完成" : st.activeText);
+
+    return `
+      <div class="${cardClass}">
+        <div class="stage-head">
+          <div class="${iconClass}">${iconContent}${ring}</div>
+          <div style="min-width: 0; flex: 1;">
+            <div class="${titleClass}">${st.title}</div>
+            <div class="stage-sub">Stage ${i + 1} / 4</div>
+          </div>
+        </div>
+        <div class="${statusClass}">
+          ${isActive ? '<span style="display:inline-block; width:10px; height:10px; border:1.5px solid #b89060; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite;"></span>' : ''}
+          <span>${statusText}</span>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  // 注入 spin 关键帧（一次性）
+  if (!document.getElementById("spin-kf")) {
+    const s = document.createElement("style");
+    s.id = "spin-kf";
+    s.textContent = "@keyframes spin { to { transform: rotate(360deg); } }";
+    document.head.appendChild(s);
+  }
+}
+
+function renderProgress(progressPct) {
+  const fill = document.getElementById("progress-fill");
+  fill.style.width = `${Math.max(0, Math.min(100, progressPct))}%`;
+
+  const shimmer = document.getElementById("progress-shimmer");
+  if (!state.allDone && progressPct < 100) {
+    shimmer.style.left = `${Math.max(0, progressPct - 12)}%`;
+    shimmer.style.display = "block";
+  } else {
+    shimmer.style.display = "none";
+  }
+
+  const pulseGlow = document.getElementById("progress-pulse-glow");
+  if (!state.allDone && progressPct >= 85) {
+    pulseGlow.style.display = "block";
+  } else {
+    pulseGlow.style.display = "none";
+  }
+
+  const finalHighlight = document.getElementById("progress-final-highlight");
+  if (state.donePulse) {
+    finalHighlight.style.display = "block";
+  } else {
+    finalHighlight.style.display = "none";
+  }
+}
+
+function renderHeader(elapsed) {
+  const title = document.getElementById("title-text");
+  const subtitle = document.getElementById("subtitle-text");
+  const pill = document.getElementById("timer-pill");
+  const timerText = document.getElementById("timer-text");
+
+  if (state.allDone) {
+    title.textContent = "✅ 全维度诊断完成";
+    subtitle.textContent = "顶部诊断指标已就绪，建议体系正在平滑展开...";
+    pill.className = "timer-pill done";
+    timerText.textContent = `⏱️ 共耗时 ${elapsed.toFixed(1)}s`;
+  } else if (state.running) {
+    title.textContent = "Agent 推理流水线 · 双阶段并行";
+    subtitle.textContent = "全维度人岗匹配 · STAR 行动蓝图与项目置换深度编排中";
+    pill.className = "timer-pill running";
+    timerText.textContent = `⏱️ 已耗时 ${elapsed.toFixed(1)}s · 预计 60-90 秒`;
+  } else {
+    title.textContent = "点击下方「开始模拟」启动";
+    subtitle.textContent = "S-curve 平滑推进 · 60FPS rAF 驱动";
+    pill.className = "timer-pill running";
+    timerText.textContent = `⏱️ 0.0s`;
+  }
+}
+
+function renderMetrics(elapsed, progressPct) {
+  document.getElementById("m-elapsed").textContent = `${elapsed.toFixed(2)}s`;
+  document.getElementById("m-progress").textContent = `${progressPct.toFixed(1)}%`;
+
+  let stageLabel = "未启动";
+  if (state.allDone) stageLabel = "✅ 完成";
+  else if (state.stages[3].status === "active") stageLabel = "阶段二 STAR 生成";
+  else if (state.stages[0].status === "done" && state.stages[1].status === "done" && state.stages[2].status === "done") stageLabel = "阶段一完成→阶段二启动";
+  else if (state.stages[0].status === "active") stageLabel = "阶段一并发诊断";
+  document.getElementById("m-stage").textContent = stageLabel;
+  document.getElementById("m-fps").textContent = currentFps;
+}
+
+// ==================== 曲线图绘制 ====================
+function drawChart() {
+  const canvas = document.getElementById("chart");
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // 背景网格
+  ctx.strokeStyle = "#f3f4f6";
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 10; i++) {
+    const x = (W / 10) * i;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+  for (let i = 0; i <= 4; i++) {
+    const y = (H / 4) * i;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+
+  // 坐标轴标签
+  ctx.fillStyle = "#9ca3af";
+  ctx.font = "10px sans-serif";
+  for (let i = 0; i <= 12; i += 2) {
+    const x = (W / 12) * i;
+    ctx.fillText(`${i}s`, x + 2, H - 4);
+  }
+  for (let i = 0; i <= 100; i += 25) {
+    const y = H - (H / 100) * i;
+    ctx.fillText(`${i}%`, 4, y - 2);
+  }
+
+  // 预设节点（圆点）：8s/25%, 50s/75%, 80s/92%, 120s/97%
+  const nodes = [
+    { t: 8, p: 25 }, { t: 50, p: 75 }, { t: 80, p: 92 }, { t: 120, p: 97 }
+  ];
+  ctx.fillStyle = "#C48B71";
+  nodes.forEach(n => {
+    if (n.t > 130) return;
+    const x = (W / 130) * n.t;
+    const y = H - (H / 100) * n.p;
+    ctx.beginPath();
+    ctx.arc(x, y, 3, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // 真实进度曲线
+  if (chartPoints.length > 1) {
+    ctx.strokeStyle = "#4A6B82";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    chartPoints.forEach((p, i) => {
+      const x = (W / 130) * p.t;
+      const y = H - (H / 100) * p.p;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // 当前点
+    const last = chartPoints[chartPoints.length - 1];
+    const x = (W / 130) * last.t;
+    const y = H - (H / 100) * last.p;
+    ctx.fillStyle = "#4A6B82";
+    ctx.beginPath();
+    ctx.arc(x, y, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// ==================== 主循环（rAF 驱动）====================
+function tick() {
+  if (!state.running) return;
+
+  const now = state.endMs ?? Date.now();
+  const elapsedMs = now - state.startMs;
+  const elapsed = elapsedMs / 1000;
+
+  // FPS 计算
+  const nowMs = Date.now();
+  if (lastFrameTime > 0) {
+    const delta = nowMs - lastFrameTime;
+    if (delta > 0) {
+      fpsCounter++;
+      if (nowMs - fpsLastUpdate >= 500) {
+        currentFps = Math.round((fpsCounter * 1000) / (nowMs - fpsLastUpdate));
+        fpsCounter = 0;
+        fpsLastUpdate = nowMs;
+      }
+    }
+  }
+  lastFrameTime = nowMs;
+
+  // 模拟阶段一完成（在 8s 时自动把节点 1/2/3 级联打勾）
+  if (!state.p1CompletedAt && elapsedMs >= 8000) {
+    state.p1CompletedAt = elapsedMs;
+    state.stages[0] = { id: 1, status: "done", detail: "已提取 8 个硬技能与门槛指标" };
+    setTimeout(() => {
+      state.stages[1] = { id: 2, status: "done", detail: "发现 2 个高 ROI 置换项目" };
+      renderStages();
+    }, 400);
+    setTimeout(() => {
+      state.stages[2] = { id: 3, status: "done", detail: "命中 3 项规则约束" };
+      // 同时启动阶段二
+      state.stages[3] = { id: 4, status: "active", detail: "正在生成可落地的行动蓝图..." };
+      renderStages();
+    }, 800);
+  }
+
+  // 1) 自动完成触发（必须在 completion detection 之前）
+  if (document.getElementById("auto-complete-enabled").checked) {
+    const autoAt = parseFloat(document.getElementById("auto-complete-at").value);
+    if (!state.allDone && elapsed >= autoAt) {
+      completeNow();
+    }
+  }
+
+  // 2) 完成检测：donePulse 触发时立即显式渲染，确保标题、stage 4、隐藏调度都同步生效
+  if (state.allDone && !state.donePulse) {
+    state.donePulse = true;
+    state.stages[3] = { id: 4, status: "done", detail: "✅ 病灶分流处方生成完成" };
+    setProgress(100);
+    document.getElementById("pipeline-card").classList.add("done-pulse");
+    // 立即同步渲染，避免依赖后续 render 调用导致的状态错位
+    renderHeader(elapsed);
+    renderProgress(100);
+    renderStages();
+    renderMetrics(elapsed, 100);
+    // 2s 后淡出隐藏
+    setTimeout(() => {
+      state.hidden = true;
+      document.getElementById("pipeline-card").classList.add("hidden");
+    }, 2000);
+  } else if (!state.donePulse) {
+    const p = computeProgress(elapsedMs, state.allDone);
+    setProgress(p);
+  }
+
+  const progressPct = state.donePulse ? 100 : computeProgress(elapsedMs, state.allDone);
+
+  renderHeader(elapsed);
+  renderProgress(progressPct);
+  renderStages();
+  renderMetrics(elapsed, progressPct);
+
+  // 采样曲线
+  if (chartPoints.length === 0 || elapsed - chartPoints[chartPoints.length - 1].t > 0.2) {
+    chartPoints.push({ t: elapsed, p: progressPct });
+    drawChart();
+  }
+
+  if (!state.donePulse) {
+    rafId = requestAnimationFrame(tick);
+  }
+}
+
+function setProgress(p) {
+  state.progress = p;
+}
+
+// ==================== 控制按钮 ====================
+function startSim() {
+  if (state.running) return;
+  state = {
+    ...state,
+    running: true,
+    startMs: Date.now(),
+    endMs: null,
+    allDone: false,
+    donePulse: false,
+    hidden: false,
+    stages: [
+      { id: 1, status: "active", detail: "" },
+      { id: 2, status: "active", detail: "" },
+      { id: 3, status: "active", detail: "" },
+      { id: 4, status: "pending", detail: "" },
+    ],
+    p1CompletedAt: null,
+    p2CompletedAt: null,
+  };
+  chartPoints = [];
+  fpsCounter = 0;
+  fpsLastUpdate = Date.now();
+  currentFps = 0;
+  lastFrameTime = 0;
+  document.getElementById("pipeline-card").classList.remove("hidden", "done-pulse");
+  document.getElementById("btn-start").disabled = true;
+  document.getElementById("btn-complete").disabled = false;
+  document.getElementById("btn-fail").disabled = false;
+  rafId = requestAnimationFrame(tick);
+}
+
+function completeNow() {
+  if (!state.running || state.allDone) return;
+  state.allDone = true;
+  state.endMs = Date.now();
+  state.stages[0] = { id: 1, status: "done", detail: "已提取 8 个硬技能与门槛指标" };
+  state.stages[1] = { id: 2, status: "done", detail: "发现 2 个高 ROI 置换项目" };
+  state.stages[2] = { id: 3, status: "done", detail: "命中 3 项规则约束" };
+  document.getElementById("btn-complete").disabled = true;
+  document.getElementById("btn-fail").disabled = true;
+}
+
+function failNow() {
+  if (!state.running || state.allDone) return;
+  state.running = false;
+  state.endMs = Date.now();
+  cancelAnimationFrame(rafId);
+  document.getElementById("btn-start").disabled = false;
+  document.getElementById("btn-complete").disabled = true;
+  document.getElementById("btn-fail").disabled = true;
+  document.getElementById("title-text").textContent = "❌ 模拟失败（重置后再启动）";
+  document.getElementById("timer-text").textContent = `⏱️ 已耗时 ${((state.endMs - state.startMs) / 1000).toFixed(1)}s · 失败`;
+}
+
+function reset() {
+  cancelAnimationFrame(rafId);
+  state = {
+    running: false, startMs: null, endMs: null, allDone: false, donePulse: false, hidden: false,
+    stages: [1,2,3,4].map(id => ({ id, status: "pending", detail: "" })),
+    p1CompletedAt: null, p2CompletedAt: null, progress: 0,
+  };
+  chartPoints = [];
+  document.getElementById("pipeline-card").classList.remove("hidden", "done-pulse");
+  document.getElementById("btn-start").disabled = false;
+  document.getElementById("btn-complete").disabled = true;
+  document.getElementById("btn-fail").disabled = true;
+  renderHeader(0);
+  renderProgress(0);
+  renderStages();
+  renderMetrics(0, 0);
+  drawChart();
+}
+
+// ==================== 事件绑定 ====================
+document.getElementById("btn-start").addEventListener("click", startSim);
+document.getElementById("btn-complete").addEventListener("click", completeNow);
+document.getElementById("btn-fail").addEventListener("click", failNow);
+document.getElementById("btn-reset").addEventListener("click", reset);
+
+document.getElementById("auto-complete-at").addEventListener("input", (e) => {
+  document.getElementById("auto-complete-label").textContent = `${e.target.value}s`;
+});
+
+// 初始化
+renderHeader(0);
+renderProgress(0);
+renderStages();
+renderMetrics(0, 0);
+drawChart();
+</script>
+</body>
+</html>

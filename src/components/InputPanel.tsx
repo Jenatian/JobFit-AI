@@ -215,14 +215,14 @@ export function InputPanel({
                     strokeLinecap="round"
                   />
                 </svg>
-                <span>AI 正在深度分析，请稍候…</span>
+                <span>深度 Agent 推理中，请稍候…</span>
               </>
             ) : (
               <>
                 <span className="text-lg leading-none">🚀</span>
                 <span>开始全维度对齐与项目取舍诊断</span>
                 <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white/20 text-xs font-normal backdrop-blur ml-1">
-                  约 10-20s
+                  约 60-90s 深度全案诊断
                 </span>
               </>
             )}

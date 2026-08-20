@@ -62,9 +62,16 @@ const config: Config = {
       },
       animation: {
         "pulse-slow": "pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite",
+        "pulse-ring": "pulseRing 1.6s cubic-bezier(0.215, 0.61, 0.355, 1) infinite",
         shimmer: "shimmer 1.5s infinite linear",
         "fade-in": "fadeIn 0.5s ease-out",
         "slide-up": "slideUp 0.4s ease-out",
+        "spin-slow": "spin 6s linear infinite",
+        "stagger-1": "fadeSlideUp 0.55s 60ms ease-out both",
+        "stagger-2": "fadeSlideUp 0.55s 200ms ease-out both",
+        "stagger-3": "fadeSlideUp 0.55s 340ms ease-out both",
+        "stagger-4": "fadeSlideUp 0.55s 480ms ease-out both",
+        "stagger-5": "fadeSlideUp 0.55s 620ms ease-out both",
       },
       keyframes: {
         shimmer: {
@@ -77,6 +84,27 @@ const config: Config = {
         },
         slideUp: {
           "0%": { opacity: "0", transform: "translateY(12px)" },
+          "100%": { opacity: "1", transform: "translateY(0)" },
+        },
+        pulseRing: {
+          "0%": {
+            transform: "scale(0.85)",
+            opacity: "0.75",
+            boxShadow: "0 0 0 0 rgba(212,197,154,0.55)",
+          },
+          "70%": {
+            transform: "scale(1.05)",
+            opacity: "0",
+            boxShadow: "0 0 0 10px rgba(212,197,154,0)",
+          },
+          "100%": {
+            transform: "scale(1)",
+            opacity: "0",
+            boxShadow: "0 0 0 0 rgba(212,197,154,0)",
+          },
+        },
+        fadeSlideUp: {
+          "0%": { opacity: "0", transform: "translateY(18px)" },
           "100%": { opacity: "1", transform: "translateY(0)" },
         },
       },

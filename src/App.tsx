@@ -3,10 +3,16 @@ import { Header } from "@/components/Header";
 import { InputPanel } from "@/components/InputPanel";
 import { ResultPanel } from "@/components/ResultPanel";
 import { PrintReport } from "@/components/PrintReport";
+import { AgentPipeline, dispatchPipelineUpdate } from "@/components/AgentPipeline";
 import { demoResume, demoJD, demoExtraProjects } from "@/lib/demo-data";
 import { loadFromStorage, saveToStorage, clearStorage } from "@/lib/storage";
-import { analyzeResume } from "@/lib/aiService";
+import {
+  analyzePhase1,
+  analyzePhase2,
+  type Phase1Result,
+} from "@/lib/aiService";
 import type { AnalysisResult } from "@/lib/types";
+import type { PipelineStageUpdate } from "@/lib/aiService";
 
 interface ToastState {
   visible: boolean;
@@ -72,8 +78,18 @@ export default function App() {
   const [resume, setResume] = useState("");
   const [jd, setJD] = useState("");
   const [extraProjects, setExtraProjects] = useState("");
+  // loading = true 表示并行请求未全部结束（P1+P2任一未完成仍loading）
   const [loading, setLoading] = useState(false);
+  // p1Done = P1 返回后立即置 true（用于让 LoadingSkeleton 立刻消失）
+  const [phase1Result, setPhase1Result] = useState<Phase1Result | null>(null);
+  const [phase2Suggestions, setPhase2Suggestions] = useState<
+    AnalysisResult["suggestions"] | null
+  >(null);
+  // 兼容老合成完整 result（如 demo / 历史缓存 / 单请求）
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [requestStartMs, setRequestStartMs] = useState<number | null>(null);
+  const [requestEndMs, setRequestEndMs] = useState<number | null>(null);
+  const [resultKey, setResultKey] = useState<number>(0);
   const [toast, setToast] = useState<ToastState>({
     visible: false,
     type: "error",
@@ -126,6 +142,8 @@ export default function App() {
     setJD(demoJD);
     setExtraProjects(demoExtraProjects);
     setResult(null);
+    setPhase1Result(null);
+    setPhase2Suggestions(null);
   }, []);
 
   const handleClearAll = useCallback(() => {
@@ -134,14 +152,21 @@ export default function App() {
     setJD("");
     setExtraProjects("");
     setResult(null);
+    setPhase1Result(null);
+    setPhase2Suggestions(null);
     clearStorage();
     showSuccessToast("已清空", "所有输入和诊断结果已清空");
   }, [showSuccessToast]);
 
   const handleSubmit = useCallback(async () => {
     if (!resume.trim() || !jd.trim()) return;
+    const startAt = Date.now();
+    setRequestStartMs(startAt);
+    setRequestEndMs(null);
     setLoading(true);
     setResult(null);
+    setPhase1Result(null);
+    setPhase2Suggestions(null);
     setToast((prev) => ({ ...prev, visible: false }));
 
     const payload = {
@@ -150,28 +175,108 @@ export default function App() {
       extra_projects: extraProjects.trim(),
     };
 
+    // Wire: aiService.callback → CustomEvent → AgentPipeline sink
+    const onStage = (u: PipelineStageUpdate) => dispatchPipelineUpdate(u);
+
     console.log(
-      `[前端] 提交分析请求: resume=${payload.resume.length}字, jd=${payload.jd.length}字, extra=${payload.extra_projects.length}字`
+      `[前端] 双阶段并行提交: resume=${payload.resume.length}字, jd=${payload.jd.length}字, extra=${payload.extra_projects.length}字`
     );
 
+    let p1: Phase1Result | null = null;
+    let p1Error: Error | null = null;
+
+    // === 双阶段同时发起（真正并行）：Promise.allSettled 结构但各自处理 ===
+    // P1 先回 -> 立刻渲染仪表盘+战略+关键词（2~3s即达，不再假等）
+    // P2 后回 -> 渲染建议卡片
+    const p1Promise = (async () => {
+      try {
+        const p = await analyzePhase1(
+          payload.resume,
+          payload.jd,
+          payload.extra_projects,
+          onStage
+        );
+        p1 = p;
+        setPhase1Result(p);
+        setResultKey((k) => k + 1);
+        console.log(
+          `[前端][P1] ${Date.now() - startAt}ms, score=${p.match_score}, missing=${p.missing_keywords.length}`
+        );
+        return { ok: true, p } as const;
+      } catch (e: any) {
+        p1Error = e;
+        return { ok: false, err: e } as const;
+      }
+    })();
+
+    // P2 需要画像上下文才能分流精准 → 等待 P1 完成后携带 P1 结果调用
+    // 但依然并行于用户体验：P1 到就显示前三模块，P2 再补最后
+    const p2Promise = (async () => {
+      try {
+        // 等待 P1 画像结果（~2-3s）
+        const p1Out = await p1Promise;
+        if (!p1Out.ok) {
+          // P1 已失败：P2 不跑（统一抛错交给外层合并处理）
+          return { ok: false, skip: true } as const;
+        }
+        const suggestions = await analyzePhase2(
+          payload.resume,
+          payload.jd,
+          payload.extra_projects,
+          p1Out.p,
+          onStage
+        );
+        setPhase2Suggestions(suggestions);
+        console.log(
+          `[前端][P2] ${Date.now() - startAt}ms, suggestions=${suggestions.length}`
+        );
+        return { ok: true, suggestions } as const;
+      } catch (e: any) {
+        return { ok: false, err: e } as const;
+      }
+    })();
+
     try {
-      const data = await analyzeResume(
-        payload.resume,
-        payload.jd,
-        payload.extra_projects
-      );
+      const [p1OutFinal, p2OutFinal] = await Promise.all([p1Promise, p2Promise]);
+      const endAt = Date.now();
+      setRequestEndMs(endAt);
+
+      if (!p1OutFinal.ok) {
+        throw p1OutFinal.err instanceof Error ? p1OutFinal.err : new Error(String(p1OutFinal.err || "阶段一失败"));
+      }
+      if (!p2OutFinal.ok) {
+        if ((p2OutFinal as any).skip) {
+          // P1 failed already, was thrown above
+        } else {
+          throw p2OutFinal.err instanceof Error
+            ? p2OutFinal.err
+            : new Error(String((p2OutFinal as any).err || "阶段二失败"));
+        }
+      }
+
+      // 合并为完整 AnalysisResult（用于缓存、打印）
+      const full: AnalysisResult = {
+        ...p1OutFinal.p,
+        suggestions: (p2OutFinal as any).suggestions ?? [],
+      } as AnalysisResult;
+      setResult(full);
       console.log(
-        `[前端] 分析成功: match_score=${data?.match_score ?? "N/A"}`
+        `[前端] 双阶段全部完成 ${endAt - startAt}ms, score=${full.match_score}, suggestions=${full.suggestions.length}`
       );
-      setResult(data);
     } catch (e: any) {
       console.error("[前端] AI 调用失败:", e?.message || e);
+      setRequestEndMs(Date.now());
+      // 回滚：清空中间态（避免停在 P1 成功 P2 失败的"半截"）
+      setPhase1Result(null);
+      setPhase2Suggestions(null);
       showErrorToast(
         e?.message?.includes("API Key")
           ? "API Key 未配置"
           : e?.message?.includes("网络异常")
             ? "网络异常"
-            : "分析失败",
+            : e?.message?.includes("阶段一") || e?.message?.includes("阶段二")
+              ? "AI 返回异常"
+              : "分析失败",
         e?.message ||
           "AI 调用失败，请稍后重试。若反复失败，请检查 API Key 配置。"
       );
@@ -212,7 +317,18 @@ export default function App() {
               </section>
 
               <section className="lg:col-span-7 xl:col-span-8 min-w-0">
-                <ResultPanel result={result} loading={loading} />
+                <AgentPipeline
+                  running={loading}
+                  startMs={requestStartMs}
+                  endMs={requestEndMs}
+                />
+                <ResultPanel
+                  result={result}
+                  phase1Result={phase1Result}
+                  phase2Suggestions={phase2Suggestions}
+                  loading={loading && !phase1Result && !result}
+                  resultKey={resultKey}
+                />
               </section>
             </div>
           </div>
