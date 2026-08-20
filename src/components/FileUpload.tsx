@@ -8,14 +8,16 @@ import {
   Loader2,
   FileIcon,
 } from "lucide-react";
-// mammoth 已支持浏览器端运行（package.json 中的 ^1.12.1）
-import mammoth from "mammoth/mammoth.browser";
+// 纯前端文件解析模块（PDF / DOCX / TXT / MD）
+import { parseFile, type ParsedFileInfo } from "@/lib/fileParser";
 
 interface FileInfo {
   filename: string;
   charCount: number;
   size: number;
   ext: string;
+  pageCount?: number;
+  parser?: ParsedFileInfo["parser"];
 }
 
 interface FileUploadProps {
@@ -26,63 +28,26 @@ interface FileUploadProps {
   uploadedFile?: FileInfo | null;
 }
 
-const ALLOWED_ACCEPT = ".pdf,.docx,.doc,.txt,.md";
+const ALLOWED_ACCEPT = ".pdf,.docx,.txt,.md";
 
 const EXT_LABELS: Record<string, string> = {
   ".pdf": "PDF",
   ".docx": "DOCX",
-  ".doc": "DOC",
   ".txt": "TXT",
   ".md": "MD",
+};
+
+const PARSER_LABELS: Record<string, string> = {
+  pdf: "PDF 文本提取",
+  docx: "DOCX 文档解析",
+  txt: "文本读取",
+  markdown: "Markdown 读取",
 };
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-}
-
-function getExt(filename: string): string {
-  const lower = filename.toLowerCase();
-  if (lower.endsWith(".pdf")) return ".pdf";
-  if (lower.endsWith(".docx")) return ".docx";
-  if (lower.endsWith(".doc")) return ".doc";
-  if (lower.endsWith(".txt")) return ".txt";
-  if (lower.endsWith(".md")) return ".md";
-  return "";
-}
-
-/**
- * 纯前端文件解析（无后端依赖）
- * - .txt / .md：FileReader.readAsText 直接读取
- * - .docx：mammoth.extractRawText({ arrayBuffer }) 浏览器端解析
- * - .pdf / .doc：浏览器端无可靠轻量库，提示用户复制粘贴文本
- */
-async function parseFileInBrowser(file: File): Promise<string> {
-  const ext = getExt(file.name);
-
-  if (ext === ".txt" || ext === ".md") {
-    return await file.text();
-  }
-
-  if (ext === ".docx") {
-    const arrayBuffer = await file.arrayBuffer();
-    const result = await mammoth.extractRawText({ arrayBuffer });
-    return result.value || "";
-  }
-
-  if (ext === ".pdf" || ext === ".doc") {
-    throw new Error(
-      `浏览器端暂不支持直接解析 ${ext.toUpperCase()} 文件。请将文件内容复制后粘贴到下方文本框，或将文件另存为 .txt / .docx 格式后上传。`
-    );
-  }
-
-  // 兜底：尝试按文本读取
-  try {
-    return await file.text();
-  } catch (_) {
-    throw new Error("无法解析此文件格式，请改用 .txt / .docx 文件。");
-  }
 }
 
 export function FileUpload({
@@ -94,31 +59,38 @@ export function FileUpload({
 }: FileUploadProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
+  const [progressMsg, setProgressMsg] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const parseFile = useCallback(
+  const parseFileCallback = useCallback(
     async (file: File) => {
       setError(null);
       setIsParsing(true);
+      setProgressMsg("正在解析文件...");
 
       try {
-        const text = await parseFileInBrowser(file);
+        const { text, info } = await parseFile(file, (msg) => {
+          setProgressMsg(msg);
+        });
 
         if (text && text.trim().length > 0) {
           onParsed(text, {
-            filename: file.name,
-            charCount: text.length,
-            size: file.size,
-            ext: getExt(file.name),
+            filename: info.filename,
+            charCount: info.charCount,
+            size: info.size,
+            ext: info.ext,
+            pageCount: info.pageCount,
+            parser: info.parser,
           });
         } else {
           setError("文件内容为空，请确认文件是否损坏");
         }
       } catch (e: any) {
-        setError(e?.message || "文件解析失败，请改用 .txt / .docx 文件");
+        setError(e?.message || "文件解析失败，请改用 .pdf / .docx / .txt / .md 文件");
       } finally {
         setIsParsing(false);
+        setProgressMsg("");
         if (inputRef.current) {
           inputRef.current.value = "";
         }
@@ -131,9 +103,9 @@ export function FileUpload({
     (files: FileList | null) => {
       if (!files || files.length === 0) return;
       const file = files[0];
-      parseFile(file);
+      parseFileCallback(file);
     },
-    [parseFile]
+    [parseFileCallback]
   );
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -171,10 +143,10 @@ export function FileUpload({
         <Loader2 className="w-5 h-5 text-dusty-600 animate-spin flex-shrink-0" />
         <div className="flex-1 min-w-0">
           <div className="text-sm font-medium text-dusty-900">
-            正在解析文件内容...
+            {progressMsg || "正在解析文件内容..."}
           </div>
           <div className="text-xs text-dusty-600 mt-0.5">
-            正在提取文本，请稍候
+            正在提取文本，请稍候（PDF / DOCX 解析可能耗时数秒）
           </div>
         </div>
       </div>
@@ -201,7 +173,12 @@ export function FileUpload({
             )}
           </div>
           <div className="text-xs text-sage-700 mt-0.5">
-            已解析 {uploadedFile.charCount.toLocaleString()} 字 ·{" "}
+            {uploadedFile.parser && PARSER_LABELS[uploadedFile.parser]
+              ? PARSER_LABELS[uploadedFile.parser] + " · "
+              : ""}
+            已解析 {uploadedFile.charCount.toLocaleString()} 字
+            {uploadedFile.pageCount ? ` · ${uploadedFile.pageCount} 页` : ""}
+            {" · "}
             {formatSize(uploadedFile.size)}
           </div>
         </div>
